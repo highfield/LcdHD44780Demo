@@ -10,6 +10,15 @@ using Windows.Foundation;
 
 namespace LcdHD44780
 {
+    // Original Wiring Diagram: https://highfieldtales.files.wordpress.com/2016/02/rpi2-hd44780_schem.jpg?w=620
+    // Concept: Use SPI to write to LCD through a 74HC595 Shift Register
+    /// <summary>
+    /// Singleton - A driver for an LCD Module (HD44780-based) for Windows IoT by Mario Vernari [MIT License] (modified by Justin Sargent)
+    /// <para/>
+    /// Usage:
+    /// 1) [Awaitable] Init/Start - LCD_Driver.Instance.StartAsync(LCD_Driver.Layout16x2/20x4)
+    /// 2) Use - LCD_Driver._Instance.DrawString(*msg*, *col, row*)
+    /// </summary>
     internal class DriverHD44780
     {
         //some ready-to-use display configurations
@@ -173,15 +182,16 @@ namespace LcdHD44780
                  * - send one byte, and immediately the byte for the 4-bit mode
                  * - the chip is now working in 4-bit mode
                  **/
+
+                // Dev-Note (Problem): If the LCD ain't powered off between app restarts (like when Visual Studio debugging) - LCD might bug and 'not update'
+                //      Fix, Make sure LCD is in 8bit mode before switching to 4bit - https://github.com/highfield/LcdHD44780Demo/issues/1
                 this._bufferIndex = 0;
-                this.WriteCommand(LcdSetFunc8);
-                this.Send();
-                await Task.Delay(5);    //this yields a small pause
-
-                this.WriteCommand(LcdSetFunc8);
-                this.Send();
-                await Task.Delay(1);    //this yields a small pause
-
+                for (int i = 0; i < 3; i++) // This 'Algorithm' makes sure LCD is in 8-bit mode (https://en.wikipedia.org/wiki/Hitachi_HD44780_LCD_controller#Mode_Selection)
+                {
+                    this.WriteByte(0b0011);
+                    this.Send();
+                    await Task.Delay(6);
+                }
                 this.WriteCommand(LcdSetFunc8);
                 this.WriteCommand(LcdSetFunc4);
 
@@ -197,7 +207,7 @@ namespace LcdHD44780
                 this.Clear();
 
                 //start the rendering timer
-                this._timer = new Timer(this.TimerCallback, null, 200, 200);
+                this._timer = new Timer(this.TimerCallback, null, 420, 200);
             }
             catch (Exception e)
             {
@@ -435,10 +445,17 @@ namespace LcdHD44780
             int data
             )
         {
-            this._buffer[this._bufferIndex + 0] = (byte)(data | LcdEnable);
-            this._buffer[this._bufferIndex + 1] = (byte)data;
+            if (this._bufferIndex > (this._buffer.Length - 2)) // My check (buffer smaller than index - seen it during debugger testing)
+            {
+                System.Diagnostics.Debug.Fail("!Ugly Problem (will lead to gibberish on LCD till HARD reset !!! The buffer index is greater than the buffer size. (" + this._bufferIndex + " - " + this._buffer.Length + ")");
+            }
+            else
+            {
+                this._buffer[this._bufferIndex + 0] = (byte)(data | LcdEnable);
+                this._buffer[this._bufferIndex + 1] = (byte)data;
 
-            this._bufferIndex += 2;
+                this._bufferIndex += 2;
+            }
         }
 
 
@@ -456,29 +473,21 @@ namespace LcdHD44780
             this._hash++;
         }
 
-
+        private bool alreadyRunning = false; // prevents TimerCallback from 'overlapping'
         private void TimerCallback(object state)
         {
             //checks whether something in the cache has changed
             if (this._hash == this._lastHash) return;
             this._lastHash = this._hash;
 
-            //physical row #0 (always present)
-            int row = this._physicalRow0;
-
-            int address = 0x80;
-            WriteCommand(address);
-
-            this.DumpPhysicalRow(
-                this._cache,
-                (short)row,
-                (row >> 16)
-                );
-
-            //physical row #1
-            if ((row = this._physicalRow1) != 0)
+            if(alreadyRunning == false)
             {
-                address += AddressStep;
+                alreadyRunning = true; // needed to prevent the nasty buffer index error
+
+                //physical row #0 (always present)
+                int row = this._physicalRow0;
+
+                int address = 0x80;
                 WriteCommand(address);
 
                 this.DumpPhysicalRow(
@@ -486,6 +495,25 @@ namespace LcdHD44780
                     (short)row,
                     (row >> 16)
                     );
+
+                //physical row #1
+                if ((row = this._physicalRow1) != 0)
+                {
+                    address += AddressStep;
+                    WriteCommand(address);
+
+                    this.DumpPhysicalRow(
+                        this._cache,
+                        (short)row,
+                        (row >> 16)
+                        );
+                }
+
+                alreadyRunning = false; // Set false so it greenlights the next 'timer tick' to run
+            }
+            else
+            {
+                // making sure the 'ticker tick' isn't 'overlapping', solves the nasty buffer index error
             }
         }
 
